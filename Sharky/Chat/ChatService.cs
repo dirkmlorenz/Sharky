@@ -4,7 +4,7 @@
     {
         IChatDataService ChatDataService;
         SharkyOptions SharkyOptions;
-        ActiveChatData ActiveChatData;
+        public ActiveChatData ActiveChatData;
         EnemyData EnemyData;
         MacroData MacroData;
 
