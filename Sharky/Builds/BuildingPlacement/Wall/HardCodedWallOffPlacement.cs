@@ -57,19 +57,16 @@
             if (unitType == UnitTypes.PROTOSS_PYLON)
             {
                 var placement = ProtossWallService.FindPylonPlacement(wallData, maxDistance, mineralProximity, wallOffType);
-                if (placement == null) { return null; }
                 return placement;
             }
             else if (SharkyUnitData.TerranTypes.Contains(unitType))
             {
                 var placement = TerranWallService.FindTerranPlacement(wallData, unitType, wallOffType);
-                if (placement == null) { return null; }
                 return placement;
             }
             else
             {
                 var placement = FindProductionPlacement(wallData, size, maxDistance, mineralProximity, wallOffType);
-                if (placement == null) { return null; }
                 return placement;
             }
         }
