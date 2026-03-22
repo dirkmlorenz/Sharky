@@ -41,6 +41,17 @@
 
         public Point2D FindFullWallPylonPlacement(WallData wallData)
         {
+            // if no structure at block, block with pylon
+            var block = wallData.Block;
+            var existingBuildings = ActiveUnitData.SelfUnits.Values.Where(u => u.Attributes.Contains(SC2Attribute.Structure));
+            if (!existingBuildings.Any(e => e.Position.X == block.X && e.Position.Y == block.Y))
+            {
+                if (WallService.Buildable(block, 1))
+                {
+                    return block;
+                }
+            }
+
             return FindPartialWallPylonPlacement(wallData);
         }
 
