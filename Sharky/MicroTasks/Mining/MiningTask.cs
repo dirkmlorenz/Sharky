@@ -18,6 +18,7 @@
         TargetingService TargetingService;
 
         public bool LongDistanceMiningEnabled { get; set; }
+        public bool WorkerTransferEnabled { get; set; } = true;
         public bool AttackWithIdleWorkers { get; set; } = true;
         public bool RecallDistantWorkers { get; set; } = true;
 
@@ -303,6 +304,10 @@
         List<SC2APIProtocol.Action> TransferWorkers(int frame)
         {
             var actions = new List<SC2APIProtocol.Action>();
+            if (!WorkerTransferEnabled)
+            {
+                return actions;
+            }
 
             var unsaturated = BaseData.SelfBases.Where(b => b.ResourceCenter != null && b.ResourceCenter.BuildProgress == 1 && b.MineralMiningInfo.Any(m => m.Workers.Count() < 2));
             var overSaturated = BaseData.SelfBases.Where(b => b.ResourceCenter != null && b.ResourceCenter.BuildProgress == 1 && b.MineralMiningInfo.Any(m => m.Workers.Count() > 2));
