@@ -201,5 +201,10 @@
             }
             return actions;
         }
+
+        public void UpdateUnitMicroController(UnitTypes unitType, IIndividualMicroController microController)
+        {
+            MicroData.IndividualMicroControllers[unitType] = microController;
+        }
     }
 }

@@ -143,5 +143,10 @@
                 return actions;
             }
         }
+
+        public void UpdateUnitMicroController(UnitTypes unitType, IIndividualMicroController microController)
+        {
+            MicroController.UpdateUnitMicroController(unitType, microController);
+        }
     }
 }
