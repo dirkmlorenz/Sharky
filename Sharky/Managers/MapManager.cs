@@ -62,6 +62,7 @@
 
         public bool FullVisionMode { get; set; } = false;
         public bool DoUpdateConnectedComponents { get; set; } = false;
+        private bool DidUpdatedConnectedComponentsRecently = false;
 
         public MapManager(MapData mapData, ActiveUnitData activeUnitData, SharkyOptions sharkyOptions, SharkyUnitData sharkyUnitData, DebugService debugService, WallDataService wallDataService)
         {
@@ -119,8 +120,16 @@
             UpdatePathBlocked();
             if (DoUpdateConnectedComponents)
             {
-                UpdateConnectedComponents();
-                UpdateStructureInfos();
+                if (DidUpdatedConnectedComponentsRecently)
+                {
+                    DidUpdatedConnectedComponentsRecently = false;
+                }
+                else
+                {
+                    UpdateConnectedComponents();
+                    UpdateStructureInfos();
+                    DidUpdatedConnectedComponentsRecently = true;
+                }
             }
 
             return null;
