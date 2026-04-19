@@ -601,6 +601,121 @@
             return data.Data[pixelID];
         }
 
+        private static bool IsWalkable(MapCell[,] map, int x, int y)
+        {
+            var cell = map[x, y];
+            return cell.Walkable && !cell.PathBlocked;
+        }
+
+        private (int x, int y) NearbyWalkable(MapCell[,] map, int x, int y)
+        {
+            if (IsWalkable(map, x, y))
+            {
+                return (x, y);
+            }
+            var xMax = map.GetLength(0) - 1;
+            var yMax = map.GetLength(1) - 1;
+            for (int i = 1; i < 10;  i++)
+            {
+                var xl = Math.Max(0, x - i);
+                var yl = Math.Max(0, y - i);
+                if (IsWalkable(map, xl, yl))
+                {
+                    return (xl, yl);
+                }
+                var xu = Math.Min(xMax, x + i);
+                if (IsWalkable(map, xu, yl))
+                {
+                    return (xu, yl);
+                }
+                var yu = Math.Min(yMax, y + i);
+                if (IsWalkable(map, xl, yu))
+                {
+                    return (xl, yu);
+                }
+                if (IsWalkable(map, xu, yu))
+                {
+                    return (xu, yu);
+                }
+            }
+            return (x, y);
+        }
+
+        private static List<(int x, int y)> ReconstructPath(
+            (int x, int y)?[,] parent,
+            (int x, int y) start,
+            (int x, int y) end,
+            bool reverse = false
+        )
+        {
+            var path = new List<(int x, int y)>();
+            var current = end;
+
+            while (current != start)
+            {
+                path.Add(current);
+                current = parent[current.x, current.y].Value;
+            }
+
+            path.Add(start);
+            if (!reverse)
+            {
+                path.Reverse();
+            }
+            return path;
+        }
+
+        public List<(int x, int y)> FindShortestWalkablePath((int x, int y) start, (int x, int y) end, bool reverse = false)
+        {
+            var map = MapData.Map;
+            var rows = MapData.MapWidth;
+            var cols = MapData.MapHeight;
+
+            start = NearbyWalkable(map, start.x, start.y);
+            end = NearbyWalkable(map, end.x, end.y);
+
+            var directions = new (int dx, int dy)[]
+            {
+                (0, 1), (1, 0), (0, -1), (-1, 0), (-1, -1), (-1, 1), (1, -1), (1, 1)
+            };
+
+            var queue = new Queue<(int x, int y)>();
+            var visited = new bool[rows, cols];
+            var parent = new (int x, int y)?[rows, cols];
+
+            queue.Enqueue(start);
+            visited[start.x, start.y] = true;
+
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+
+                if (current == end)
+                    return ReconstructPath(parent, start, end, reverse);
+
+                foreach (var (dx, dy) in directions)
+                {
+                    int nx = current.x + dx;
+                    int ny = current.y + dy;
+
+                    if (nx >= 0 && ny >= 0 && nx < rows && ny < cols)
+                    {
+                        if (!visited[nx, ny] && IsWalkable(map, nx, ny))
+                        {
+                            visited[nx, ny] = true;
+                            parent[nx, ny] = current;
+                            queue.Enqueue((nx, ny));
+                        }
+                    }
+                }
+            }
+
+            // No path found
+            return null;
+        }
+
+        public List<(int x, int y)> FindShortestWalkablePath((float x, float y) start, (float x, float y) end, bool reverse = false) => FindShortestWalkablePath(((int)start.x, (int)start.y), ((int)end.x, (int)end.y), reverse);
+
         private void UpdateConnectedComponents()
         {
             var map = MapData.Map;
@@ -617,7 +732,7 @@
             {
                 for (int j = 0; j < nY; j++)
                 {
-                    if (!IsWalkable(i, j) || components[i, j] != 0)
+                    if (!IsWalkable(map, i, j) || components[i, j] != 0)
                         continue;
 
                     component++;
@@ -638,7 +753,7 @@
                             if (nr < 0 || nc < 0 || nr >= nX || nc >= nY)
                                 continue;
 
-                            if (!IsWalkable(nr, nc) || components[nr, nc] != 0)
+                            if (!IsWalkable(map, nr, nc) || components[nr, nc] != 0)
                                 continue;
 
                             components[nr, nc] = component;
@@ -654,12 +769,6 @@
                     //TagService.Tag($"ncc_{NumConnectedComponents}_{component}");
                 }
                 CCInfo.NumConnectedComponents = component;
-            }
-
-            bool IsWalkable(int x, int y)
-            {
-                var cell = map[x, y];
-                return cell.Walkable && !cell.PathBlocked;
             }
         }
 
@@ -721,6 +830,7 @@
         public int[] GetConnectedComponents(Vector2 pos) => GetConnectedComponents(pos.X, pos.Y);
         public int[] GetConnectedComponents(UnitCalculation uc) => GetConnectedComponents(uc.Position);
         public int[] GetConnectedComponents(SC2APIProtocol.Point p) => GetConnectedComponents(p.X, p.Y);
+        public int[] GetConnectedComponents(SC2APIProtocol.Point2D p) => GetConnectedComponents(p.X, p.Y);
 
         public int[] GetConnectedComponentsByUnitTag(ulong  unitTag)
         {
