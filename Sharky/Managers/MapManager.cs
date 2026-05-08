@@ -665,7 +665,10 @@
             return path;
         }
 
-        public List<(int x, int y)> FindShortestWalkablePath((int x, int y) start, (int x, int y) end, bool reverse = false)
+        public List<(int x, int y)> FindShortestWalkablePath(
+            (int x, int y) start,
+            (int x, int y) end,
+            bool reverse = false)
         {
             var map = MapData.Map;
             var rows = MapData.MapWidth;
@@ -674,38 +677,68 @@
             start = NearbyWalkable(map, start.x, start.y);
             end = NearbyWalkable(map, end.x, end.y);
 
-            var directions = new (int dx, int dy)[]
+            var directions = new (int dx, int dy, double cost)[]
             {
-                (0, 1), (1, 0), (0, -1), (-1, 0), (-1, -1), (-1, 1), (1, -1), (1, 1)
+                (0, 1, 1.0),
+                (1, 0, 1.0),
+                (0, -1, 1.0),
+                (-1, 0, 1.0),
+
+                (-1, -1, Math.Sqrt(2)),
+                (-1, 1, Math.Sqrt(2)),
+                (1, -1, Math.Sqrt(2)),
+                (1, 1, Math.Sqrt(2))
             };
 
-            var queue = new Queue<(int x, int y)>();
+            var distances = new double[rows, cols];
             var visited = new bool[rows, cols];
             var parent = new (int x, int y)?[rows, cols];
 
-            queue.Enqueue(start);
-            visited[start.x, start.y] = true;
+            // Initialize distances
+            for (int x = 0; x < rows; x++)
+            {
+                for (int y = 0; y < cols; y++)
+                {
+                    distances[x, y] = double.MaxValue;
+                }
+            }
+
+            distances[start.x, start.y] = 0.0;
+
+            var queue = new PriorityQueue<(int x, int y), double>();
+            queue.Enqueue(start, 0);
 
             while (queue.Count > 0)
             {
                 var current = queue.Dequeue();
 
+                if (visited[current.x, current.y])
+                    continue;
+
+                visited[current.x, current.y] = true;
+
                 if (current == end)
                     return ReconstructPath(parent, start, end, reverse);
 
-                foreach (var (dx, dy) in directions)
+                foreach (var (dx, dy, moveCost) in directions)
                 {
                     int nx = current.x + dx;
                     int ny = current.y + dy;
 
-                    if (nx >= 0 && ny >= 0 && nx < rows && ny < cols)
+                    if (nx < 0 || ny < 0 || nx >= rows || ny >= cols)
+                        continue;
+
+                    if (!IsWalkable(map, nx, ny))
+                        continue;
+
+                    double newCost = distances[current.x, current.y] + moveCost;
+
+                    if (newCost < distances[nx, ny])
                     {
-                        if (!visited[nx, ny] && IsWalkable(map, nx, ny))
-                        {
-                            visited[nx, ny] = true;
-                            parent[nx, ny] = current;
-                            queue.Enqueue((nx, ny));
-                        }
+                        distances[nx, ny] = newCost;
+                        parent[nx, ny] = current;
+
+                        queue.Enqueue((nx, ny), newCost);
                     }
                 }
             }
@@ -715,6 +748,85 @@
         }
 
         public List<(int x, int y)> FindShortestWalkablePath((float x, float y) start, (float x, float y) end, bool reverse = false) => FindShortestWalkablePath(((int)start.x, (int)start.y), ((int)end.x, (int)end.y), reverse);
+
+        public double[,] ComputeDistanceToNearestObstacle()
+        {
+            var map = MapData.Map;
+            var rows = MapData.MapWidth;
+            var cols = MapData.MapHeight;
+
+            var distances = new double[rows, cols];
+            var visited = new bool[rows, cols];
+
+            // Initialize all distances to infinity
+            for (int x = 0; x < rows; x++)
+            {
+                for (int y = 0; y < cols; y++)
+                {
+                    distances[x, y] = double.MaxValue;
+                }
+            }
+
+            var directions = new (int dx, int dy, double cost)[]
+            {
+                (0, 1, 1.0),
+                (1, 0, 1.0),
+                (0, -1, 1.0),
+                (-1, 0, 1.0),
+
+                (-1, -1, Math.Sqrt(2)),
+                (-1, 1, Math.Sqrt(2)),
+                (1, -1, Math.Sqrt(2)),
+                (1, 1, Math.Sqrt(2))
+            };
+
+            var queue = new PriorityQueue<(int x, int y), double>();
+
+            // Seed queue with ALL non-walkable cells
+            for (int x = 0; x < rows; x++)
+            {
+                for (int y = 0; y < cols; y++)
+                {
+                    if (!IsWalkable(map, x, y))
+                    {
+                        distances[x, y] = 0;
+                        queue.Enqueue((x, y), 0);
+                    }
+                }
+            }
+
+            // Multi-source Dijkstra
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+
+                if (visited[current.x, current.y])
+                    continue;
+
+                visited[current.x, current.y] = true;
+
+                foreach (var (dx, dy, moveCost) in directions)
+                {
+                    int nx = current.x + dx;
+                    int ny = current.y + dy;
+
+                    if (nx < 0 || ny < 0 || nx >= rows || ny >= cols)
+                        continue;
+
+                    double newDist =
+                        distances[current.x, current.y] + moveCost;
+
+                    if (newDist < distances[nx, ny])
+                    {
+                        distances[nx, ny] = newDist;
+
+                        queue.Enqueue((nx, ny), newDist);
+                    }
+                }
+            }
+
+            return distances;
+        }
 
         private void UpdateConnectedComponents()
         {
