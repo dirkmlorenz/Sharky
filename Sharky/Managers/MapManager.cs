@@ -987,6 +987,27 @@
             return false;
         }
 
+        private void SaveGridImage(
+            int rows,
+            int cols,
+            string filePath,
+            Func<int, int, System.Drawing.Color> colorFunc)
+        {
+            using var bmp = new System.Drawing.Bitmap(rows, cols);
+
+            int flip = cols - 1;
+
+            for (int r = 0; r < rows; r++)
+            {
+                for (int c = 0; c < cols; c++)
+                {
+                    bmp.SetPixel(r, flip - c, colorFunc(r, c));
+                }
+            }
+
+            bmp.Save(filePath, System.Drawing.Imaging.ImageFormat.Png);
+        }
+
         public void SaveConnectedComponents()
         {
             var baseColors = new System.Drawing.Color[]
@@ -1007,39 +1028,40 @@
             var components = ccinfo.ConnectedComponents!;
             var nRows = components.GetLength(0);
             var nCols = components.GetLength(1);
-            var flip = nCols - 1;
-            var bmp = new System.Drawing.Bitmap(nRows, nCols);
+
             var rng = new Random(0);
             var extraColors = new Dictionary<int, System.Drawing.Color>();
-            for (int r = 0; r < nRows; r++)
+
+            System.Drawing.Color GetColor(int r, int c)
             {
-                for (int c = 0; c < nCols; c++)
+                var id = components[r, c];
+                if (id == 0)
                 {
-                    var id = components[r, c];
-                    System.Drawing.Color color;
-                    if (id == 0)
-                    {
-                        color = System.Drawing.Color.DarkGray;
-                    }
-                    else if (id <= baseColors.Length)
-                    {
-                        color = baseColors[id - 1];
-                    }
-                    else
-                    {
-                        if (!extraColors.TryGetValue(id, out color))
-                        {
-                            color = System.Drawing.Color.FromArgb(
-                                rng.Next(50, 256),
-                                rng.Next(50, 256),
-                                rng.Next(50, 256));
-                            extraColors[id] = color;
-                        }
-                    }
-                    bmp.SetPixel(r, flip - c, color); // flip y axis - I think that's how it works in the game
+                    return System.Drawing.Color.DarkGray;
                 }
+                if (id <= baseColors.Length)
+                {
+                    return baseColors[id - 1];
+                }
+
+                if (!extraColors.TryGetValue(id, out var color))
+                {
+                    color = System.Drawing.Color.FromArgb(
+                        rng.Next(50, 256),
+                        rng.Next(50, 256),
+                        rng.Next(50, 256));
+
+                    extraColors[id] = color;
+                }
+
+                return color;
             }
-            bmp.Save(@"C:\temp\temp.png", System.Drawing.Imaging.ImageFormat.Png);
+
+            SaveGridImage(
+                nRows,
+                nCols,
+                @"C:\temp\temp.png",
+                GetColor);
         }
 
         public void SaveTerrainHeight()
@@ -1052,34 +1074,99 @@
             var scale = 1.0 / heightDiff;
             var nRows = map.GetLength(0);
             var nCols = map.GetLength(1);
-            var bmp = new System.Drawing.Bitmap(nRows, nCols);
-            var flip = nCols - 1;
-            for (int r = 0; r < nRows; r++)
+
+            int HeightValue(MapCell m)
             {
-                for (int c = 0; c < nCols; c++)
+                return (int)((m.TerrainHeight - minHeight) * scale * 200.0);
+            }
+
+            SaveGridImage(
+                nRows,
+                nCols,
+                @"C:\temp\terrainHeight.png",
+                (r, c) =>
                 {
                     var m = map[r, c];
-                    var walkable = m.Walkable;
-                    var x = (int)((m.TerrainHeight - minHeight) * scale * 200.0);
-                    var pathBlocked = m.PathBlocked;
-                    var color = System.Drawing.Color.FromArgb(walkable ? x : 255, walkable ? 255 : x, pathBlocked ? 255 : x);
-                    bmp.SetPixel(r, flip - c, color); // flip y axis - I think that's how it works in the game
-                }
-            }
-            bmp.Save(@"C:\temp\terrainHeight.png", System.Drawing.Imaging.ImageFormat.Png);
+
+                    bool walkable = m.Walkable;
+                    bool pathBlocked = m.PathBlocked;
+
+                    int x = HeightValue(m);
+
+                    return System.Drawing.Color.FromArgb(
+                        walkable ? x : 255,
+                        walkable ? 255 : x,
+                        pathBlocked ? 255 : x);
+                });
+
+            SaveGridImage(
+                nRows,
+                nCols,
+                @"C:\temp\terrainHeight_blocked.png",
+                (r, c) =>
+                {
+                    var m = map[r, c];
+
+                    bool walkable = m.Walkable && !m.PathBlocked;
+
+                    int x = HeightValue(m);
+
+                    return System.Drawing.Color.FromArgb(
+                        walkable ? x : 255,
+                        walkable ? 255 : x,
+                        x);
+                });
+        }
+
+        public void SaveDistanceToNearestObstacle()
+        {
+            var distances = ComputeDistanceToNearestObstacle();
+            var map = MapData.Map;
+
+            int nRows = distances.GetLength(0);
+            int nCols = distances.GetLength(1);
+
+            // Find maximum distance among walkable cells
+            double maxDistance = 0;
 
             for (int r = 0; r < nRows; r++)
             {
                 for (int c = 0; c < nCols; c++)
                 {
-                    var m = map[r, c];
-                    var walkable = m.Walkable && !m.PathBlocked;
-                    var x = (int)((m.TerrainHeight - minHeight) * scale * 200.0);
-                    var color = System.Drawing.Color.FromArgb(walkable ? x : 255, walkable ? 255 : x, x);
-                    bmp.SetPixel(r, flip - c, color); // flip y axis - I think that's how it works in the game
+                    if (IsWalkable(map, r, c))
+                    {
+                        maxDistance = Math.Max(maxDistance, distances[r, c]);
+                    }
                 }
             }
-            bmp.Save(@"C:\temp\terrainHeight_blocked.png", System.Drawing.Imaging.ImageFormat.Png);
+
+            // Avoid divide-by-zero
+            if (maxDistance <= 0)
+                maxDistance = 1;
+
+            SaveGridImage(
+                nRows,
+                nCols,
+                @"C:\temp\distance_to_obstacle.png",
+                (r, c) =>
+                {
+                    // Non-walkable cells = black
+                    if (!IsWalkable(map, r, c))
+                    {
+                        return System.Drawing.Color.Black;
+                    }
+
+                    // Normalize to 0-255 grayscale
+                    int intensity = (int)(
+                        distances[r, c] / maxDistance * 255.0);
+
+                    intensity = Math.Clamp(intensity, 0, 255);
+
+                    return System.Drawing.Color.FromArgb(
+                        intensity,
+                        intensity,
+                        intensity);
+                });
         }
     }
 }
