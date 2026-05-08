@@ -986,5 +986,100 @@
             }
             return false;
         }
+
+        public void SaveConnectedComponents()
+        {
+            var baseColors = new System.Drawing.Color[]
+            {
+                System.Drawing.Color.Red,
+                System.Drawing.Color.Lime,
+                System.Drawing.Color.Blue,
+                System.Drawing.Color.Yellow,
+                System.Drawing.Color.Cyan,
+                System.Drawing.Color.Magenta,
+                System.Drawing.Color.Orange,
+            };
+            var ccinfo = GetConnectedComponentInfo();
+            if (ccinfo.ConnectedComponents is null)
+            {
+                return;
+            }
+            var components = ccinfo.ConnectedComponents!;
+            var nRows = components.GetLength(0);
+            var nCols = components.GetLength(1);
+            var flip = nCols - 1;
+            var bmp = new System.Drawing.Bitmap(nRows, nCols);
+            var rng = new Random(0);
+            var extraColors = new Dictionary<int, System.Drawing.Color>();
+            for (int r = 0; r < nRows; r++)
+            {
+                for (int c = 0; c < nCols; c++)
+                {
+                    var id = components[r, c];
+                    System.Drawing.Color color;
+                    if (id == 0)
+                    {
+                        color = System.Drawing.Color.DarkGray;
+                    }
+                    else if (id <= baseColors.Length)
+                    {
+                        color = baseColors[id - 1];
+                    }
+                    else
+                    {
+                        if (!extraColors.TryGetValue(id, out color))
+                        {
+                            color = System.Drawing.Color.FromArgb(
+                                rng.Next(50, 256),
+                                rng.Next(50, 256),
+                                rng.Next(50, 256));
+                            extraColors[id] = color;
+                        }
+                    }
+                    bmp.SetPixel(r, flip - c, color); // flip y axis - I think that's how it works in the game
+                }
+            }
+            bmp.Save(@"C:\temp\temp.png", System.Drawing.Imaging.ImageFormat.Png);
+        }
+
+        public void SaveTerrainHeight()
+        {
+            var map = MapData.Map;
+            var mcs = map.Cast<MapCell>();
+            var maxHeight = mcs.Max(x => x.TerrainHeight);
+            var minHeight = mcs.Min(x => x.TerrainHeight);
+            var heightDiff = maxHeight - minHeight;
+            var scale = 1.0 / heightDiff;
+            var nRows = map.GetLength(0);
+            var nCols = map.GetLength(1);
+            var bmp = new System.Drawing.Bitmap(nRows, nCols);
+            var flip = nCols - 1;
+            for (int r = 0; r < nRows; r++)
+            {
+                for (int c = 0; c < nCols; c++)
+                {
+                    var m = map[r, c];
+                    var walkable = m.Walkable;
+                    var x = (int)((m.TerrainHeight - minHeight) * scale * 200.0);
+                    var pathBlocked = m.PathBlocked;
+                    var color = System.Drawing.Color.FromArgb(walkable ? x : 255, walkable ? 255 : x, pathBlocked ? 255 : x);
+                    bmp.SetPixel(r, flip - c, color); // flip y axis - I think that's how it works in the game
+                }
+            }
+            bmp.Save(@"C:\temp\terrainHeight.png", System.Drawing.Imaging.ImageFormat.Png);
+
+            for (int r = 0; r < nRows; r++)
+            {
+                for (int c = 0; c < nCols; c++)
+                {
+                    var m = map[r, c];
+                    var walkable = m.Walkable && !m.PathBlocked;
+                    var x = (int)((m.TerrainHeight - minHeight) * scale * 200.0);
+                    var color = System.Drawing.Color.FromArgb(walkable ? x : 255, walkable ? 255 : x, x);
+                    bmp.SetPixel(r, flip - c, color); // flip y axis - I think that's how it works in the game
+                }
+            }
+            bmp.Save(@"C:\temp\terrainHeight_blocked.png", System.Drawing.Imaging.ImageFormat.Png);
+        }
     }
 }
