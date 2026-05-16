@@ -14,5 +14,16 @@
                 microTask.Value.StealUnit(commander);
             }
         }
+
+        /// <summary>
+        /// Assigns a new micro controller for a unit in the attack task
+        /// </summary>
+        public void UpdateAttackMicroController(UnitTypes unitType, IIndividualMicroController microController)
+        {
+            if (this.GetValueOrDefault("AttackTask") is AttackTask attackTask)
+            {
+                attackTask.UpdateUnitMicroController(unitType, microController);
+            }
+        }
     }
 }

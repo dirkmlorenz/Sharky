@@ -447,5 +447,10 @@ namespace Sharky.MicroControllers
                 }
             }
         }
+
+        public void UpdateUnitMicroController(UnitTypes unitType, IIndividualMicroController microController)
+        {
+            throw new NotImplementedException();
+        }
     }
 }

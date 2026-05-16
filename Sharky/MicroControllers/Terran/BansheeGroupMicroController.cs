@@ -245,5 +245,10 @@
         {
             return Attack(commanders, target, defensivePoint, groupCenter, frame);
         }
+
+        public void UpdateUnitMicroController(UnitTypes unitType, IIndividualMicroController microController)
+        {
+            throw new NotImplementedException();
+        }
     }
 }
