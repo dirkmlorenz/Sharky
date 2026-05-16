@@ -46,6 +46,55 @@
             }
         }
 
+        public sealed class RegionInfo
+        {
+            public int RegionId { get; init; }
+
+            // Median-ish representative position
+            public IntPoint Centroid { get; set; }
+
+            // Boundary cells
+            public List<IntPoint> Outline { get; } = new();
+
+            // Neighboring region IDs
+            public HashSet<int> AdjacentRegions { get; } = new();
+
+            // Optional stats
+            public int Area { get; set; }
+
+            // Extents
+            public int MinX { get; set; } = int.MaxValue;
+            public int MaxX { get; set; } = int.MinValue;
+            public int MinY { get; set; } = int.MaxValue;
+            public int MaxY { get; set; } = int.MinValue;
+
+            // Distances from centroid to corners
+            public double DistanceToBottomLeft { get; set; }
+            public double DistanceToBottomRight { get; set; }
+            public double DistanceToTopLeft { get; set; }
+            public double DistanceToTopRight { get; set; }
+
+            // Closest-to-corner indicators
+            public bool ClosestToBottomLeft { get; set; }
+            public bool ClosestToBottomRight { get; set; }
+            public bool ClosestToTopLeft { get; set; }
+            public bool ClosestToTopRight { get; set; }
+        }
+
+        public sealed class RegionAnalysis
+        {
+            public Dictionary<int, RegionInfo> Regions { get; } = new();
+
+            // Sparse adjacency representation
+            public Dictionary<int, HashSet<int>> Adjacency => Regions
+                .ToDictionary(kv => kv.Key, kv => kv.Value.AdjacentRegions);
+
+            // Optional dense adjacency matrix
+            public bool[,] AdjacencyMatrix { get; init; }
+        }
+
+        public readonly record struct IntPoint(int X, int Y);
+
         ActiveUnitData ActiveUnitData;
         MapData MapData;
         SharkyUnitData SharkyUnitData;
@@ -59,6 +108,9 @@
         private readonly Dictionary<UnitTypes, int> EstimatedFootPrintSizes = new();
         private readonly ConnectedComponentInfo CCInfo = new();
         private StructureInfo?[,] StructureInfos { get; set; } = null;
+        private double[,] DistanceNoNearestObstacle = null;
+        private int[,] Regions = null;
+        private RegionAnalysis RegionsInfo;
 
         public bool FullVisionMode { get; set; } = false;
         public bool DoUpdateConnectedComponents { get; set; } = false;
@@ -92,11 +144,19 @@
                     var walkable = GetDataValueBit(pathingGrid, x, y);
                     var height = GetDataValueByte(heightGrid, x, y);
                     var placeable = GetDataValueBit(placementGrid, x, y);
-                    MapData.Map[x,y] = new MapCell { X = x, Y = y, Walkable = walkable, TerrainHeight = height, Buildable = placeable, HasCreep = false, CurrentlyBuildable = placeable, EnemyAirDpsInRange = 0, EnemyGroundDpsInRange = 0, InEnemyVision = false, InSelfVision = false, InEnemyDetection = false, InSelfDetection = false, Visibility = 0, LastFrameVisibility = 0, NumberOfAllies = 0, NumberOfEnemies = 0, PoweredBySelfPylon = false, SelfAirDpsInRange = 0, SelfGroundDpsInRange = 0, LastFrameAlliesTouched = 0, PathBlocked = false };
+                    MapData.Map[x, y] = new MapCell { X = x, Y = y, Walkable = walkable, TerrainHeight = height, Buildable = placeable, HasCreep = false, CurrentlyBuildable = placeable, EnemyAirDpsInRange = 0, EnemyGroundDpsInRange = 0, InEnemyVision = false, InSelfVision = false, InEnemyDetection = false, InSelfDetection = false, Visibility = 0, LastFrameVisibility = 0, NumberOfAllies = 0, NumberOfEnemies = 0, PoweredBySelfPylon = false, SelfAirDpsInRange = 0, SelfGroundDpsInRange = 0, LastFrameAlliesTouched = 0, PathBlocked = false };
                 }
             }
 
-           MapData.MapName = gameInfo.MapName;
+            foreach (var unit in observation.Observation.RawData.Units)
+            {
+                foreach (var node in GetNodesInFootPrint(unit, MapData.MapWidth, MapData.MapHeight))
+                {
+                    MapData.Map[node.X, node.Y].Walkable = true;
+                }
+            }
+
+            MapData.MapName = gameInfo.MapName;
         }
 
         public override IEnumerable<SC2APIProtocol.Action> OnFrame(ResponseObservation observation)
@@ -107,16 +167,17 @@
             }
             //DrawPaths();
 
-            if (FramesPerUpdate > observation.Observation.GameLoop - LastUpdateFrame) { return null; }
-            LastUpdateFrame = (int)observation.Observation.GameLoop;
+            var frame = (int)observation.Observation.GameLoop;
+            if (FramesPerUpdate > frame - LastUpdateFrame) { return null; }
+            LastUpdateFrame = frame;
 
-            UpdateVisibility(observation.Observation.RawData.MapState.Visibility, (int)observation.Observation.GameLoop);
+            UpdateVisibility(observation.Observation.RawData.MapState.Visibility, frame);
             UpdateCreep(observation.Observation.RawData.MapState.Creep);
             UpdateEnemyDpsInRange();
             UpdateInEnemyDetection();
             UpdateInSelfDetection();
             UpdateInEnemyVision();
-            UpdateNumberOfAllies((int)observation.Observation.GameLoop);
+            UpdateNumberOfAllies(frame);
             UpdatePathBlocked();
             if (DoUpdateConnectedComponents)
             {
@@ -129,6 +190,27 @@
                     UpdateConnectedComponents();
                     UpdateStructureInfos();
                     DidUpdatedConnectedComponentsRecently = true;
+                }
+            }
+            if (DistanceNoNearestObstacle is null)
+            {
+                Console.WriteLine($"MapManager: Calculating distances to nearest obstacles at frame {frame}");
+                DistanceNoNearestObstacle = ComputeDistanceToNearestObstacle();
+            }
+            else
+            {
+                if (Regions is null)
+                {
+                    Console.WriteLine($"MapManager: Identifying regions at frame {frame}");
+                    Regions = ComputeRegionsWeightedGrowth(DistanceNoNearestObstacle);
+                }
+                else
+                {
+                    if (RegionsInfo is null)
+                    {
+                        Console.WriteLine($"MapManager: Analyzing regions at frame {frame}");
+                        RegionsInfo = AnalyzeRegions(Regions);
+                    }
                 }
             }
 
@@ -171,8 +253,8 @@
                     var point = new Point { X = (int)camera.X + x, Y = (int)camera.Y + y, Z = height + 1 };
                     var color = new Color { R = 255, G = 255, B = 255 };
                     if (point.X + 1 < MapData.MapWidth && point.Y + 1 < MapData.MapHeight && point.X > 0 && point.Y > 0)
-                    {        
-                        if (!MapData.Map[(int)point.X,(int)point.Y].CurrentlyBuildable)
+                    {
+                        if (!MapData.Map[(int)point.X, (int)point.Y].CurrentlyBuildable)
                         {
                             color = new Color { R = 255, G = 0, B = 0 };
                         }
@@ -190,7 +272,7 @@
             {
                 for (var y = 0; y < MapData.MapHeight; y++)
                 {
-                    MapData.Map[x,y].NumberOfAllies = 0;
+                    MapData.Map[x, y].NumberOfAllies = 0;
                 }
             }
 
@@ -199,8 +281,8 @@
                 var nodes = GetNodesInRange(selfUnit.Value.Unit.Pos, selfUnit.Value.Unit.Radius, MapData.MapWidth, MapData.MapHeight);
                 foreach (var node in nodes)
                 {
-                    MapData.Map[(int)node.X,(int)node.Y].NumberOfAllies += 1;
-                    MapData.Map[(int)node.X,(int)node.Y].LastFrameAlliesTouched = frame;
+                    MapData.Map[(int)node.X, (int)node.Y].NumberOfAllies += 1;
+                    MapData.Map[(int)node.X, (int)node.Y].LastFrameAlliesTouched = frame;
                 }
             }
         }
@@ -211,7 +293,7 @@
             {
                 for (var y = 0; y < MapData.MapHeight; y++)
                 {
-                    var mc = MapData.Map[x,y];
+                    var mc = MapData.Map[x, y];
                     mc.EnemyAirDpsInRange = 0;
                     mc.EnemyGroundDpsInRange = 0;
                     mc.EnemyAirSplashDpsInRange = 0;
@@ -227,10 +309,10 @@
                     var splash = SharkyUnitData.AirSplashDamagers.Contains((UnitTypes)enemy.Value.Unit.UnitType);
                     foreach (var node in nodes)
                     {
-                        MapData.Map[(int)node.X,(int)node.Y].EnemyAirDpsInRange += enemy.Value.Dps;
+                        MapData.Map[(int)node.X, (int)node.Y].EnemyAirDpsInRange += enemy.Value.Dps;
                         if (splash)
                         {
-                            MapData.Map[(int)node.X,(int)node.Y].EnemyAirSplashDpsInRange += enemy.Value.Dps;
+                            MapData.Map[(int)node.X, (int)node.Y].EnemyAirSplashDpsInRange += enemy.Value.Dps;
                         }
                     }
                 }
@@ -240,22 +322,22 @@
                     var splash = SharkyUnitData.GroundSplashDamagers.Contains((UnitTypes)enemy.Value.Unit.UnitType);
                     foreach (var node in nodes)
                     {
-                        MapData.Map[(int)node.X,(int)node.Y].EnemyGroundDpsInRange += enemy.Value.Dps;
+                        MapData.Map[(int)node.X, (int)node.Y].EnemyGroundDpsInRange += enemy.Value.Dps;
                         if (splash)
                         {
-                            MapData.Map[(int)node.X,(int)node.Y].EnemyGroundSplashDpsInRange += enemy.Value.Dps;
+                            MapData.Map[(int)node.X, (int)node.Y].EnemyGroundSplashDpsInRange += enemy.Value.Dps;
                         }
                     }
                 }
                 if (enemy.Value.Unit.UnitType == (uint)UnitTypes.ZERG_INFESTOR || enemy.Value.Unit.UnitType == (uint)UnitTypes.PROTOSS_HIGHTEMPLAR)
-                {                
+                {
                     if (enemy.Value.Unit.Energy > 70)
                     {
                         var nodes = GetNodesInRange(enemy.Value.Unit.Pos, 12, MapData.MapWidth, MapData.MapHeight);
                         foreach (var node in nodes)
                         {
-                            MapData.Map[(int)node.X,(int)node.Y].EnemyAirSplashDpsInRange += 50;
-                            MapData.Map[(int)node.X,(int)node.Y].EnemyGroundSplashDpsInRange += 50;
+                            MapData.Map[(int)node.X, (int)node.Y].EnemyAirSplashDpsInRange += 50;
+                            MapData.Map[(int)node.X, (int)node.Y].EnemyGroundSplashDpsInRange += 50;
                         }
                     }
                 }
@@ -272,7 +354,7 @@
             {
                 for (var y = 0; y < MapData.MapHeight; y++)
                 {
-                    MapData.Map[x,y].PathBlocked = false;
+                    MapData.Map[x, y].PathBlocked = false;
                 }
             }
 
@@ -281,7 +363,7 @@
                 var nodes = GetNodesInFootPrint(uc.Unit, MapData.MapWidth, MapData.MapHeight);
                 foreach (var node in nodes)
                 {
-                    MapData.Map[(int)node.X,(int)node.Y].PathBlocked = true;
+                    MapData.Map[node.X, node.Y].PathBlocked = true;
                 }
             }
         }
@@ -292,7 +374,7 @@
             {
                 for (var y = 0; y < MapData.MapHeight; y++)
                 {
-                    MapData.Map[x,y].InSelfDetection = false;
+                    MapData.Map[x, y].InSelfDetection = false;
                 }
             }
 
@@ -301,7 +383,7 @@
                 var nodes = GetNodesInRange(unitCalculation.Value.Unit.Pos, unitCalculation.Value.Unit.DetectRange + 1, MapData.MapWidth, MapData.MapHeight);
                 foreach (var node in nodes)
                 {
-                    MapData.Map[(int)node.X,(int)node.Y].InSelfDetection = true;
+                    MapData.Map[(int)node.X, (int)node.Y].InSelfDetection = true;
                 }
             }
 
@@ -310,7 +392,7 @@
                 var nodes = GetNodesInRange(new Point { X = scan.Pos[0].X, Y = scan.Pos[0].Y, Z = 1 }, scan.Radius + 2, MapData.MapWidth, MapData.MapHeight);
                 foreach (var node in nodes)
                 {
-                    MapData.Map[(int)node.X,(int)node.Y].InSelfDetection = true;
+                    MapData.Map[(int)node.X, (int)node.Y].InSelfDetection = true;
                 }
             }
         }
@@ -321,7 +403,7 @@
             {
                 for (var y = 0; y < MapData.MapHeight; y++)
                 {
-                    MapData.Map[x,y].InEnemyDetection = false;
+                    MapData.Map[x, y].InEnemyDetection = false;
                 }
             }
 
@@ -330,7 +412,7 @@
                 var nodes = GetNodesInRange(enemy.Value.Unit.Pos, 11, MapData.MapWidth, MapData.MapHeight);
                 foreach (var node in nodes)
                 {
-                    MapData.Map[(int)node.X,(int)node.Y].InEnemyDetection = true;
+                    MapData.Map[(int)node.X, (int)node.Y].InEnemyDetection = true;
                 }
             }
 
@@ -339,7 +421,7 @@
                 var nodes = GetNodesInRange(new Point { X = scan.Pos[0].X, Y = scan.Pos[0].Y, Z = 1 }, scan.Radius + 2, MapData.MapWidth, MapData.MapHeight);
                 foreach (var node in nodes)
                 {
-                    MapData.Map[(int)node.X,(int)node.Y].InEnemyDetection = true;
+                    MapData.Map[(int)node.X, (int)node.Y].InEnemyDetection = true;
                 }
             }
         }
@@ -362,7 +444,7 @@
             {
                 for (var y = 0; y < MapData.MapHeight; y++)
                 {
-                    MapData.Map[x,y].InEnemyVision = false;
+                    MapData.Map[x, y].InEnemyVision = false;
                 }
             }
 
@@ -376,7 +458,7 @@
                 var nodes = GetNodesInRange(enemy.Value.Unit.Pos, radius, MapData.MapWidth, MapData.MapHeight);
                 foreach (var node in nodes)
                 {
-                    MapData.Map[(int)node.X,(int)node.Y].InEnemyVision = true;
+                    MapData.Map[(int)node.X, (int)node.Y].InEnemyVision = true;
                 }
             }
 
@@ -385,7 +467,7 @@
                 var nodes = GetNodesInRange(new Point { X = scan.Pos[0].X, Y = scan.Pos[0].Y, Z = 1 }, scan.Radius + 2, MapData.MapWidth, MapData.MapHeight);
                 foreach (var node in nodes)
                 {
-                    MapData.Map[(int)node.X,(int)node.Y].InEnemyVision = true;
+                    MapData.Map[(int)node.X, (int)node.Y].InEnemyVision = true;
                 }
             }
         }
@@ -510,9 +592,9 @@
             }
         }
 
-        private List<Vector2> GetNodesInFootPrint(Unit unit, int columns, int rows)
+        private List<IntPoint> GetNodesInFootPrint(Unit unit, int columns, int rows)
         {
-            var nodes = new List<Vector2>();
+            var nodes = new List<IntPoint>();
             var (xMin, xMax, yMin, yMax) = GetFootPrintNodeRange(unit);
 
             if (xMin < 0)
@@ -536,7 +618,7 @@
             {
                 for (int y = yMin; y <= yMax; y++)
                 {
-                    nodes.Add(new Vector2(x, y));
+                    nodes.Add(new IntPoint(x, y));
                 }
             }
 
@@ -549,7 +631,7 @@
             {
                 for (var y = 0; y < creep.Size.Y; y++)
                 {
-                    MapData.Map[x,y].HasCreep = GetDataValueBit(creep, x, y);
+                    MapData.Map[x, y].HasCreep = GetDataValueBit(creep, x, y);
                 }
             }
         }
@@ -615,7 +697,7 @@
             }
             var xMax = map.GetLength(0) - 1;
             var yMax = map.GetLength(1) - 1;
-            for (int i = 1; i < 10;  i++)
+            for (int i = 1; i < 10; i++)
             {
                 var xl = Math.Max(0, x - i);
                 var yl = Math.Max(0, y - i);
@@ -787,7 +869,7 @@
             {
                 for (int y = 0; y < cols; y++)
                 {
-                    if (!IsWalkable(map, x, y))
+                    if (!map[x, y].Walkable)
                     {
                         distances[x, y] = 0;
                         queue.Enqueue((x, y), 0);
@@ -826,6 +908,619 @@
             }
 
             return distances;
+        }
+
+        public int[,] ComputeRegionsWeightedGrowth(
+            double[,] clearance,
+            double peakThreshold = 6.0,
+            int peakSuppressionRadius = 20,
+            int minRegionSize = 128,
+            double narrowPenaltyScale = 10.0,
+            double expansionBias = 0.4)
+        {
+            int rows = clearance.GetLength(0);
+            int cols = clearance.GetLength(1);
+
+            var regionMap = new int[rows, cols];
+
+            var directions = new (int dx, int dy, double moveCost)[]
+            {
+                (1,0,1.0),
+                (-1,0,1.0),
+                (0,1,1.0),
+                (0,-1,1.0),
+
+                (1,1,Math.Sqrt(2)),
+                (1,-1,Math.Sqrt(2)),
+                (-1,1,Math.Sqrt(2)),
+                (-1,-1,Math.Sqrt(2))
+            };
+            var cardinalDirections = directions.Take(4).ToArray();
+
+            bool InBounds(int x, int y)
+            {
+                return x >= 0 && y >= 0 && x < rows && y < cols;
+            }
+
+            //
+            // ---------------------------------------------------
+            // STEP 1:
+            // Find strong peaks (region seeds)
+            // ---------------------------------------------------
+            //
+
+            var candidatePeaks = new List<(int x, int y, double h)>();
+
+            for (int x = 0; x < rows; x++)
+            {
+                for (int y = 0; y < cols; y++)
+                {
+                    double h = clearance[x, y];
+
+                    if (h < peakThreshold)
+                        continue;
+
+                    bool isPeak = true;
+
+                    foreach (var (dx, dy, _) in directions)
+                    {
+                        int nx = x + dx;
+                        int ny = y + dy;
+
+                        if (!InBounds(nx, ny))
+                            continue;
+
+                        if (clearance[nx, ny] > h)
+                        {
+                            isPeak = false;
+                            break;
+                        }
+                    }
+
+                    if (isPeak)
+                    {
+                        candidatePeaks.Add((x, y, h));
+                    }
+                }
+            }
+
+            //
+            // Non-maximum suppression
+            // Keep only dominant peaks
+            //
+
+            candidatePeaks =
+                candidatePeaks
+                .OrderByDescending(p => p.h)
+                .ToList();
+
+            var acceptedPeaks = new List<(int x, int y, double h)>();
+
+            foreach (var peak in candidatePeaks)
+            {
+                bool suppressed = false;
+
+                foreach (var existing in acceptedPeaks)
+                {
+                    int dx = peak.x - existing.x;
+                    int dy = peak.y - existing.y;
+
+                    if (dx * dx + dy * dy
+                        <= peakSuppressionRadius * peakSuppressionRadius)
+                    {
+                        suppressed = true;
+                        break;
+                    }
+                }
+
+                if (!suppressed)
+                {
+                    acceptedPeaks.Add(peak);
+                }
+            }
+
+            //
+            // ---------------------------------------------------
+            // STEP 2:
+            // Multi-source weighted region growth
+            // ---------------------------------------------------
+            //
+            // Important:
+            // We use accumulated path cost.
+            //
+            // Wide/open areas are cheap.
+            // Narrow passages are expensive.
+            //
+            // This naturally creates choke boundaries.
+            //
+
+            var bestCost = new double[rows, cols];
+
+            for (int x = 0; x < rows; x++)
+            {
+                for (int y = 0; y < cols; y++)
+                {
+                    bestCost[x, y] = double.MaxValue;
+                }
+            }
+
+            var pq =
+                new PriorityQueue<
+                    (int x, int y, int regionId, double cost),
+                    double>();
+
+            int nextRegionId = 1;
+
+            //
+            // Seed all peaks
+            //
+
+            foreach (var peak in acceptedPeaks)
+            {
+                int regionId = nextRegionId++;
+
+                regionMap[peak.x, peak.y] = regionId;
+
+                bestCost[peak.x, peak.y] = 0;
+
+                pq.Enqueue(
+                    (peak.x, peak.y, regionId, 0.0),
+                    0);
+            }
+
+            //
+            // Weighted expansion
+            //
+
+            while (pq.Count > 0)
+            {
+                var current = pq.Dequeue();
+                if (current.cost != bestCost[current.x, current.y])
+                    continue;
+
+                int x = current.x;
+                int y = current.y;
+                int regionId = current.regionId;
+
+                double currentCost = bestCost[x, y];
+
+                foreach (var (dx, dy, moveCost) in directions)
+                {
+                    int nx = x + dx;
+                    int ny = y + dy;
+
+                    if (!InBounds(nx, ny))
+                        continue;
+
+                    //
+                    // Skip walls
+                    //
+
+                    if (clearance[nx, ny] <= 0)
+                        continue;
+
+                    // disallow diagonal tunneling
+                    if (dx != 0 && dy != 0)
+                    {
+                        if (clearance[x + dx, y] <= 0 ||
+                            clearance[x, y + dy] <= 0)
+                        {
+                            continue;
+                        }
+                    }
+
+                    //
+                    // Narrow terrain penalty
+                    //
+                    // VERY IMPORTANT:
+                    //
+                    // Low clearance => expensive traversal
+                    //
+                    // This prevents regions from
+                    // leaking aggressively through
+                    // tiny corridors.
+                    //
+
+                    double terrainFactor =
+                        1.0
+                        + narrowPenaltyScale
+                        / (clearance[nx, ny] + 1.0);
+
+                    double stepCost =
+                        moveCost * terrainFactor;
+
+                    double newCost =
+                        currentCost + stepCost;
+
+                    if (newCost < bestCost[nx, ny])
+                    {
+                        bestCost[nx, ny] = newCost;
+
+                        regionMap[nx, ny] = regionId;
+
+                        pq.Enqueue(
+                            (nx, ny, regionId, newCost),
+                            newCost);
+                    }
+                }
+            }
+
+            //
+            // ---------------------------------------------------
+            // STEP 3:
+            // Remove tiny regions
+            // ---------------------------------------------------
+            //
+
+            var regionSizes = new Dictionary<int, int>();
+
+            for (int x = 0; x < rows; x++)
+            {
+                for (int y = 0; y < cols; y++)
+                {
+                    int r = regionMap[x, y];
+
+                    if (r == 0)
+                        continue;
+
+                    regionSizes.TryAdd(r, 0);
+
+                    regionSizes[r]++;
+                }
+            }
+
+            //
+            // Merge tiny regions into strongest neighbor
+            //
+
+            bool changed;
+
+            do
+            {
+                changed = false;
+
+                for (int x = 0; x < rows; x++)
+                {
+                    for (int y = 0; y < cols; y++)
+                    {
+                        int region = regionMap[x, y];
+
+                        if (region == 0)
+                            continue;
+
+                        if (regionSizes[region] >= minRegionSize)
+                            continue;
+
+                        int bestNeighbor = 0;
+                        double bestNeighborClearance = -1;
+
+                        foreach (var (dx, dy, _) in directions)
+                        {
+                            int nx = x + dx;
+                            int ny = y + dy;
+
+                            if (!InBounds(nx, ny))
+                                continue;
+
+                            int nr = regionMap[nx, ny];
+
+                            if (nr == 0 || nr == region)
+                                continue;
+
+                            if (clearance[nx, ny]
+                                > bestNeighborClearance)
+                            {
+                                bestNeighborClearance =
+                                    clearance[nx, ny];
+
+                                bestNeighbor = nr;
+                            }
+                        }
+
+                        if (bestNeighbor != 0)
+                        {
+                            regionSizes[region]--;
+                            regionSizes.TryAdd(bestNeighbor, 0);
+                            regionSizes[bestNeighbor]++;
+
+                            regionMap[x, y] = bestNeighbor;
+
+                            changed = true;
+                        }
+                    }
+                }
+
+            } while (changed);
+
+            //
+            // ---------------------------------------------------
+            // STEP 4:
+            // Fill enclosed wall holes
+            // ---------------------------------------------------
+            //
+            // Any connected component of clearance<=0 that is
+            // completely surrounded by exactly one region
+            // becomes part of that region.
+            //
+
+            var visited = new bool[rows, cols];
+
+            for (int startX = 0; startX < rows; startX++)
+            {
+                for (int startY = 0; startY < cols; startY++)
+                {
+                    if (visited[startX, startY])
+                        continue;
+
+                    if (clearance[startX, startY] > 0)
+                        continue;
+
+                    var queue = new Queue<(int x, int y)>();
+                    var component = new List<(int x, int y)>();
+
+                    // all neighboring nonzero regions
+                    var touchingRegions = new HashSet<int>();
+
+                    visited[startX, startY] = true;
+                    queue.Enqueue((startX, startY));
+
+                    while (queue.Count > 0)
+                    {
+                        var (x, y) = queue.Dequeue();
+
+                        component.Add((x, y));
+
+                        foreach (var (dx, dy, _) in cardinalDirections)
+                        {
+                            int nx = x + dx;
+                            int ny = y + dy;
+
+                            if (!InBounds(nx, ny))
+                                continue;
+
+                            //
+                            // Another wall cell
+                            //
+
+                            if (clearance[nx, ny] <= 0)
+                            {
+                                if (!visited[nx, ny])
+                                {
+                                    visited[nx, ny] = true;
+                                    queue.Enqueue((nx, ny));
+                                }
+
+                                continue;
+                            }
+
+                            //
+                            // Region neighbor
+                            //
+
+                            int neighborRegion = regionMap[nx, ny];
+
+                            if (neighborRegion != 0)
+                            {
+                                touchingRegions.Add(neighborRegion);
+                            }
+                        }
+                    }
+
+                    //
+                    // Fill only if enclosed by ONE region
+                    //
+
+                    if (touchingRegions.Count == 1)
+                    {
+                        int fillRegion = touchingRegions.First();
+
+                        foreach (var (x, y) in component)
+                        {
+                            regionMap[x, y] = fillRegion;
+                        }
+                    }
+                }
+            }
+
+            return regionMap;
+        }
+
+        public static RegionAnalysis AnalyzeRegions(int[,] map)
+        {
+            int width = map.GetLength(0);
+            int height = map.GetLength(1);
+
+            var analysis = new RegionAnalysis();
+
+            // For centroid accumulation
+            var sumX = new Dictionary<int, long>();
+            var sumY = new Dictionary<int, long>();
+
+            // Directions (4-neighborhood)
+            int[] dx = { 1, -1, 0, 0 };
+            int[] dy = { 0, 0, 1, -1 };
+
+            // PASS 1:
+            // Gather region stats, outlines, adjacency
+            for (int x = 0; x < width; x++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    int region = map[x, y];
+
+                    if (region <= 0)
+                        continue;
+
+                    if (!analysis.Regions.TryGetValue(region, out var info))
+                    {
+                        info = new RegionInfo
+                        {
+                            RegionId = region
+                        };
+
+                        analysis.Regions.Add(region, info);
+
+                        sumX[region] = 0;
+                        sumY[region] = 0;
+                    }
+
+                    info.Area++;
+
+                    info.MinX = Math.Min(info.MinX, x);
+                    info.MaxX = Math.Max(info.MaxX, x);
+
+                    info.MinY = Math.Min(info.MinY, y);
+                    info.MaxY = Math.Max(info.MaxY, y);
+
+                    sumX[region] += x;
+                    sumY[region] += y;
+
+                    bool isBoundary = false;
+
+                    for (int dir = 0; dir < 4; dir++)
+                    {
+                        int nx = x + dx[dir];
+                        int ny = y + dy[dir];
+
+                        // Outside map => boundary
+                        if (nx < 0 || ny < 0 || nx >= width || ny >= height)
+                        {
+                            isBoundary = true;
+                            continue;
+                        }
+
+                        int neighbor = map[nx, ny];
+
+                        // Different region => boundary + adjacency
+                        if (neighbor != region)
+                        {
+                            isBoundary = true;
+
+                            if (neighbor > 0)
+                            {
+                                info.AdjacentRegions.Add(neighbor);
+                            }
+                        }
+                    }
+
+                    if (isBoundary)
+                    {
+                        info.Outline.Add(new IntPoint(x, y));
+                    }
+                }
+            }
+
+            // PASS 2:
+            // Compute centroids
+            foreach (var kv in analysis.Regions)
+            {
+                int region = kv.Key;
+                RegionInfo info = kv.Value;
+
+                info.Centroid = new IntPoint(
+                    (int)(sumX[region] / info.Area),
+                    (int)(sumY[region] / info.Area));
+            }
+
+            IntPoint bottomLeft = new(0, 0);
+            IntPoint bottomRight = new(width - 1, 0);
+            IntPoint topLeft = new(0, height - 1);
+            IntPoint topRight = new(width - 1, height - 1);
+
+            static double Distance(IntPoint a, IntPoint b)
+            {
+                long dx = a.X - b.X;
+                long dy = a.Y - b.Y;
+
+                return Math.Sqrt(dx * dx + dy * dy);
+            }
+
+            foreach (var kv in analysis.Regions)
+            {
+                RegionInfo info = kv.Value;
+
+                info.DistanceToBottomLeft =
+                    Distance(info.Centroid, bottomLeft);
+
+                info.DistanceToBottomRight =
+                    Distance(info.Centroid, bottomRight);
+
+                info.DistanceToTopLeft =
+                    Distance(info.Centroid, topLeft);
+
+                info.DistanceToTopRight =
+                    Distance(info.Centroid, topRight);
+            }
+
+            RegionInfo closestBL = null;
+            RegionInfo closestBR = null;
+            RegionInfo closestTL = null;
+            RegionInfo closestTR = null;
+
+            double bestBL = double.MaxValue;
+            double bestBR = double.MaxValue;
+            double bestTL = double.MaxValue;
+            double bestTR = double.MaxValue;
+
+            foreach (var info in analysis.Regions.Values)
+            {
+                if (info.DistanceToBottomLeft < bestBL)
+                {
+                    bestBL = info.DistanceToBottomLeft;
+                    closestBL = info;
+                }
+
+                if (info.DistanceToBottomRight < bestBR)
+                {
+                    bestBR = info.DistanceToBottomRight;
+                    closestBR = info;
+                }
+
+                if (info.DistanceToTopLeft < bestTL)
+                {
+                    bestTL = info.DistanceToTopLeft;
+                    closestTL = info;
+                }
+
+                if (info.DistanceToTopRight < bestTR)
+                {
+                    bestTR = info.DistanceToTopRight;
+                    closestTR = info;
+                }
+            }
+
+            if (closestBL != null) closestBL.ClosestToBottomLeft = true;
+            if (closestBR != null) closestBR.ClosestToBottomRight = true;
+            if (closestTL != null) closestTL.ClosestToTopLeft = true;
+            if (closestTR != null) closestTR.ClosestToTopRight = true;
+
+            // Build dense adjacency matrix
+            int maxRegionId = analysis.Regions.Keys.Max();
+
+            var matrix = new bool[maxRegionId + 1, maxRegionId + 1];
+
+            foreach (var kv in analysis.Regions)
+            {
+                int a = kv.Key;
+
+                foreach (int b in kv.Value.AdjacentRegions)
+                {
+                    matrix[a, b] = true;
+                    matrix[b, a] = true;
+                }
+            }
+
+            var regions = analysis.Regions;
+            analysis = new RegionAnalysis
+            {
+                AdjacencyMatrix = matrix
+            };
+            foreach (var region in regions)
+            {
+                analysis.Regions.Add(region.Key, region.Value);
+            }
+
+            return analysis;
         }
 
         private void UpdateConnectedComponents()
@@ -903,7 +1598,7 @@
                 xMin = Math.Max(0, xMin);
                 xMax = Math.Min(nX - 1, xMax);
                 yMin = Math.Max(0, yMin);
-                yMax = Math.Min(nY  - 1, yMax);
+                yMax = Math.Min(nY - 1, yMax);
                 for (int x = xMin; x <= xMax; x++)
                 {
                     for (int y = yMin; y <= yMax; y++)
@@ -944,7 +1639,7 @@
         public int[] GetConnectedComponents(SC2APIProtocol.Point p) => GetConnectedComponents(p.X, p.Y);
         public int[] GetConnectedComponents(SC2APIProtocol.Point2D p) => GetConnectedComponents(p.X, p.Y);
 
-        public int[] GetConnectedComponentsByUnitTag(ulong  unitTag)
+        public int[] GetConnectedComponentsByUnitTag(ulong unitTag)
         {
             if (ActiveUnitData.NeutralUnits.TryGetValue(unitTag, out var n))
             {
@@ -1120,7 +1815,11 @@
 
         public void SaveDistanceToNearestObstacle()
         {
-            var distances = ComputeDistanceToNearestObstacle();
+            if (DistanceNoNearestObstacle is null)
+            {
+                return;
+            }
+            var distances = DistanceNoNearestObstacle;
             var map = MapData.Map;
 
             int nRows = distances.GetLength(0);
@@ -1133,7 +1832,7 @@
             {
                 for (int c = 0; c < nCols; c++)
                 {
-                    if (IsWalkable(map, r, c))
+                    if (map[r, c].Walkable)
                     {
                         maxDistance = Math.Max(maxDistance, distances[r, c]);
                     }
@@ -1151,7 +1850,7 @@
                 (r, c) =>
                 {
                     // Non-walkable cells = black
-                    if (!IsWalkable(map, r, c))
+                    if (!map[r, c].Walkable)
                     {
                         return System.Drawing.Color.Black;
                     }
@@ -1166,6 +1865,139 @@
                         intensity,
                         intensity,
                         intensity);
+                });
+        }
+
+        public void SaveRegions()
+        {
+            if (RegionsInfo is null)
+            {
+                return;
+            }
+            var distances = DistanceNoNearestObstacle;
+            var regions = Regions;
+
+            var regionsInfo = RegionsInfo;
+
+            var map = MapData.Map;
+
+            int nRows = distances.GetLength(0);
+            int nCols = distances.GetLength(1);
+
+            // Find maximum walkable distance
+            double maxDistance = 0;
+
+            for (int r = 0; r < nRows; r++)
+            {
+                for (int c = 0; c < nCols; c++)
+                {
+                    if (map[r, c].Walkable)
+                    {
+                        maxDistance = Math.Max(maxDistance, distances[r, c]);
+                    }
+                }
+            }
+
+            if (maxDistance <= 0)
+                maxDistance = 1;
+
+            var baseColors = new System.Drawing.Color[]
+            {
+                System.Drawing.Color.Red,
+                System.Drawing.Color.Lime,
+                System.Drawing.Color.Blue,
+                System.Drawing.Color.Yellow,
+                System.Drawing.Color.Cyan,
+                System.Drawing.Color.Magenta,
+                System.Drawing.Color.Orange,
+            };
+
+            var rng = new Random(0);
+
+            var extraColors = new Dictionary<int, System.Drawing.Color>();
+
+            System.Drawing.Color GetRegionColor(int regionId)
+            {
+                if (regionId <= 0)
+                {
+                    return System.Drawing.Color.Black;
+                }
+
+                if (regionId <= baseColors.Length)
+                {
+                    return baseColors[regionId - 1];
+                }
+
+                if (!extraColors.TryGetValue(regionId, out var color))
+                {
+                    color = System.Drawing.Color.FromArgb(
+                        rng.Next(50, 256),
+                        rng.Next(50, 256),
+                        rng.Next(50, 256));
+
+                    extraColors[regionId] = color;
+                }
+
+                return color;
+            }
+
+            // ----------------------------------------------------
+            // Build fast lookup for outline pixels
+            // ----------------------------------------------------
+
+            var outlinePixels = new HashSet<(int x, int y)>();
+
+            foreach (var region in regionsInfo.Regions.Values)
+            {
+                foreach (var p in region.Outline)
+                {
+                    outlinePixels.Add((p.X, p.Y));
+                }
+            }
+
+            SaveGridImage(
+                nRows,
+                nCols,
+                @"C:\temp\distance_regions.png",
+                (r, c) =>
+                {
+                    // Obstacles = black
+                    if (!map[r, c].Walkable)
+                    {
+                        return System.Drawing.Color.Black;
+                    }
+
+                    int regionId = regions[r, c];
+
+                    var baseColor = GetRegionColor(regionId);
+
+                    // Normalize distance to brightness factor
+                    double t = distances[r, c] / maxDistance;
+
+                    // Optional gamma adjustment for better contrast
+                    t = Math.Pow(t, 0.7);
+
+                    // ------------------------------------------------
+                    // Brighten outlines
+                    // ------------------------------------------------
+
+                    bool isOutline = outlinePixels.Contains((r, c));
+
+                    if (isOutline)
+                    {
+                        // Increase brightness for boundary pixels
+                        t = Math.Min(1.0, t * 1.6 + 0.25);
+                    }
+
+                    int rr = (int)(baseColor.R * t);
+                    int gg = (int)(baseColor.G * t);
+                    int bb = (int)(baseColor.B * t);
+
+                    rr = Math.Clamp(rr, 0, 255);
+                    gg = Math.Clamp(gg, 0, 255);
+                    bb = Math.Clamp(bb, 0, 255);
+
+                    return System.Drawing.Color.FromArgb(rr, gg, bb);
                 });
         }
     }
