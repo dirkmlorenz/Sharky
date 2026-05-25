@@ -11,7 +11,7 @@
             SharkyUnitData = defaultSharkyBot.SharkyUnitData;
         }
 
-        public UnitCommander GetWorker(Point2D location, IEnumerable<UnitCommander> workers = null)
+        public UnitCommander GetWorker(Point2D location, IEnumerable<UnitCommander> workers = null, Func<UnitCommander, bool> filter = null)
         {
             IEnumerable<UnitCommander> availableWorkers;
             if (workers == null)
@@ -20,8 +20,12 @@
                 availableWorkers = ActiveUnitData.Commanders.Values.Where(c => c.UnitCalculation.Unit.UnitType == (uint)UnitTypes.TERRAN_SCV && c.UnitCalculation.Unit.Orders.Any(o => ActiveUnitData.SelfUnits.Values.Any(s => s.Attributes.Contains(SC2APIProtocol.Attribute.Structure) && s.Unit.BuildProgress == 1 && o.TargetWorldSpacePos != null && s.Position.X == o.TargetWorldSpacePos.X && s.Position.Y == o.TargetWorldSpacePos.Y)));
                 var workersNotCarrying = ActiveUnitData.Commanders.Values.Where(c => c.UnitCalculation.UnitClassifications.HasFlag(UnitClassification.Worker) && !c.UnitCalculation.Unit.BuffIds.Any(b => SharkyUnitData.CarryingResourceBuffs.Contains((Buffs)b)));
                 availableWorkers = availableWorkers.Concat(workersNotCarrying
-                    .Where(c => (c.UnitRole == UnitRole.PreBuild || c.UnitRole == UnitRole.None || c.UnitRole == UnitRole.Minerals || c.UnitRole == UnitRole.Build) && !IsBuilding(c)))
-                    .OrderBy(p => Vector2.DistanceSquared(p.UnitCalculation.Position, new Vector2(location.X, location.Y)));
+                    .Where(c => (c.UnitRole == UnitRole.PreBuild || c.UnitRole == UnitRole.None || c.UnitRole == UnitRole.Minerals || c.UnitRole == UnitRole.Build) && !IsBuilding(c)));
+                if (filter is not null)
+                {
+                    availableWorkers = availableWorkers.Where(filter);
+                }
+                availableWorkers = availableWorkers.OrderBy(p => Vector2.DistanceSquared(p.UnitCalculation.Position, new Vector2(location.X, location.Y)));
 
                 bool IsBuilding(UnitCommander c)
                 {
