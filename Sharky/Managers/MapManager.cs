@@ -6,6 +6,8 @@
         {
             public int[,]? ConnectedComponents { get; set; } = null;
             public int NumConnectedComponents { get; set; } = 0;
+            public int PrimaryComponent { get; set; } = 0;
+            public bool FullyWalled { get; set; } = false;
         }
 
         private record StructureInfo(int XMin, int XMax, int YMin, int YMax, int[] TouchingComponents)
@@ -93,7 +95,11 @@
             public bool[,] AdjacencyMatrix { get; init; }
         }
 
-        public readonly record struct IntPoint(int X, int Y);
+        public readonly record struct IntPoint(int X, int Y)
+        {
+            public Vector2 ToVector2() => new(X, Y);
+            public Point2D ToPoint2D() => new SC2APIProtocol.Point2D { X = X, Y = Y };
+        }
 
         ActiveUnitData ActiveUnitData;
         MapData MapData;
@@ -189,6 +195,7 @@
                 {
                     UpdateConnectedComponents();
                     UpdateStructureInfos();
+                    UpdatePrimaryComponentAndFullyWalled();
                     DidUpdatedConnectedComponentsRecently = true;
                 }
             }
@@ -1609,6 +1616,29 @@
             }
         }
 
+        private void UpdatePrimaryComponentAndFullyWalled()
+        {
+            if (CCInfo.ConnectedComponents is null || RegionsInfo is null)
+            {
+                return;
+            }
+            var primaryComponent = RegionsInfo.Regions.Values.SelectMany(x => GetConnectedComponents(x.Centroid.ToVector2())).GroupBy(x => x).OrderByDescending(x => x.Count()).FirstOrDefault().Key;
+            if (primaryComponent != CCInfo.PrimaryComponent)
+            {
+                Console.WriteLine($"MapManager: Updating primary component from {CCInfo.PrimaryComponent} to {primaryComponent}");
+            }
+            CCInfo.PrimaryComponent = primaryComponent;
+            var townhalls = ActiveUnitData.SelfUnits.Values.Where(x => SharkyUnitData.ResourceCenterTypes.Contains((UnitTypes)x.Unit.UnitType));
+            var fullyWalled = townhalls.Any(x => !GetConnectedComponents(x.Position).Contains(primaryComponent));
+            if (fullyWalled != CCInfo.FullyWalled)
+            {
+                Console.WriteLine($"MapManager: Updating fully walled from {CCInfo.FullyWalled} to {fullyWalled}");
+            }
+            CCInfo.FullyWalled = fullyWalled;
+        }
+
+        public bool FullyWalled() => CCInfo is not null && CCInfo.FullyWalled;
+
         public ConnectedComponentInfo GetConnectedComponentInfo()
         {
             return CCInfo;
@@ -1636,22 +1666,31 @@
         public int[] GetConnectedComponents(float x, float y) => GetConnectedComponents((int)x, (int)y);
         public int[] GetConnectedComponents(Vector2 pos) => GetConnectedComponents(pos.X, pos.Y);
         public int[] GetConnectedComponents(UnitCalculation uc) => GetConnectedComponents(uc.Position);
-        public int[] GetConnectedComponents(SC2APIProtocol.Point p) => GetConnectedComponents(p.X, p.Y);
-        public int[] GetConnectedComponents(SC2APIProtocol.Point2D p) => GetConnectedComponents(p.X, p.Y);
+        public int[] GetConnectedComponents(Point p) => GetConnectedComponents(p.X, p.Y);
+        public int[] GetConnectedComponents(Point2D p) => GetConnectedComponents(p.X, p.Y);
 
-        public int[] GetConnectedComponentsByUnitTag(ulong unitTag)
+        private UnitCalculation GetUnitByTag(ulong unitTag)
         {
             if (ActiveUnitData.NeutralUnits.TryGetValue(unitTag, out var n))
             {
-                return GetConnectedComponents(n);
+                return n;
             }
             if (ActiveUnitData.EnemyUnits.TryGetValue(unitTag, out var e))
             {
-                return GetConnectedComponents(e);
+                return e;
             }
             if (ActiveUnitData.SelfUnits.TryGetValue(unitTag, out var s))
             {
-                return GetConnectedComponents(s);
+                return s;
+            }
+            return null;
+        }
+
+        public int[] GetConnectedComponentsByUnitTag(ulong unitTag)
+        {
+            if (GetUnitByTag(unitTag) is UnitCalculation uc)
+            {
+                return GetConnectedComponents(uc);
             }
             return Array.Empty<int>();
         }
@@ -1682,7 +1721,42 @@
             return false;
         }
 
-        private void SaveGridImage(
+        public int GetRegion(int x, int y)
+        {
+            if (Regions is null || x < 0 || y < 0 || x >= MapData.MapWidth || y >= MapData.MapHeight)
+            {
+                return 0;
+            }
+            return Regions[x, y];
+        }
+
+        public int GetRegion(float x, float y) => GetRegion((int)x, (int)y);
+        public int GetRegion(Vector2 pos) => GetRegion(pos.X, pos.Y);
+        public int GetRegion(UnitCalculation uc) => GetRegion(uc.Position);
+        public int GetRegion(Point p) => GetRegion(p.X, p.Y);
+        public int GetRegion(Point2D p) => GetRegion(p.X, p.Y);
+
+        public RegionInfo GetRegionInfo(int x, int y)
+        {
+            if (RegionsInfo is null)
+            {
+                return null;
+            }
+            var region = GetRegion(x, y);
+            if (region == 0)
+            {
+                return null;
+            }
+            return RegionsInfo.Regions[region];
+        }
+
+        public RegionInfo GetRegionInfo(float x, float y) => GetRegionInfo((int)x, (int)y);
+        public RegionInfo GetRegionInfo(Vector2 pos) => GetRegionInfo(pos.X, pos.Y);
+        public RegionInfo GetRegionInfo(UnitCalculation uc) => GetRegionInfo(uc.Position);
+        public RegionInfo GetRegionInfo(Point p) => GetRegionInfo(p.X, p.Y);
+        public RegionInfo GetRegionInfo(Point2D p) => GetRegionInfo(p.X, p.Y);
+
+        public void SaveGridImage(
             int rows,
             int cols,
             string filePath,
