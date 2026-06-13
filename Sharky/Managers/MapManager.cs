@@ -98,7 +98,7 @@
         public readonly record struct IntPoint(int X, int Y)
         {
             public Vector2 ToVector2() => new(X, Y);
-            public Point2D ToPoint2D() => new SC2APIProtocol.Point2D { X = X, Y = Y };
+            public Point2D ToPoint2D() => new Point2D { X = X, Y = Y };
         }
 
         ActiveUnitData ActiveUnitData;
@@ -117,6 +117,7 @@
         private double[,] DistanceNoNearestObstacle = null;
         private int[,] Regions = null;
         private RegionAnalysis RegionsInfo;
+        private Dictionary<int, List<IntPoint>> ReaperJumpLocations = null;
 
         public bool FullVisionMode { get; set; } = false;
         public bool DoUpdateConnectedComponents { get; set; } = false;
@@ -217,6 +218,14 @@
                     {
                         Console.WriteLine($"MapManager: Analyzing regions at frame {frame}");
                         RegionsInfo = AnalyzeRegions(Regions);
+                    }
+                    else
+                    {
+                        if (ReaperJumpLocations is null)
+                        {
+                            Console.WriteLine($"MapManager: Finding reaper jump locations at frame {frame}");
+                            ReaperJumpLocations = FindReaperJumps();
+                        }
                     }
                 }
             }
@@ -1668,6 +1677,7 @@
         public int[] GetConnectedComponents(UnitCalculation uc) => GetConnectedComponents(uc.Position);
         public int[] GetConnectedComponents(Point p) => GetConnectedComponents(p.X, p.Y);
         public int[] GetConnectedComponents(Point2D p) => GetConnectedComponents(p.X, p.Y);
+        public int[] GetConnectedComponents(IntPoint p) => GetConnectedComponents(p.X, p.Y);
 
         private UnitCalculation GetUnitByTag(ulong unitTag)
         {
@@ -1721,6 +1731,8 @@
             return false;
         }
 
+        public RegionAnalysis GetRegionsInfo() => RegionsInfo;
+
         public int GetRegion(int x, int y)
         {
             if (Regions is null || x < 0 || y < 0 || x >= MapData.MapWidth || y >= MapData.MapHeight)
@@ -1755,6 +1767,91 @@
         public RegionInfo GetRegionInfo(UnitCalculation uc) => GetRegionInfo(uc.Position);
         public RegionInfo GetRegionInfo(Point p) => GetRegionInfo(p.X, p.Y);
         public RegionInfo GetRegionInfo(Point2D p) => GetRegionInfo(p.X, p.Y);
+
+        // Helper to uniquely pack 2D grid coordinates into a single integer key
+        private static int GetTileKey(int x, int y)
+        {
+            return (x << 16) | (y & 0xFFFF);
+        }
+
+        public Dictionary<int, List<IntPoint>> FindReaperJumps()
+        {
+            var jumpLookupTable = new Dictionary<int, List<IntPoint>>();
+            var map = MapData.Map;
+            var width = MapData.MapWidth;
+            var height = MapData.MapHeight;
+
+            // Step radius of 2 to 3 cells is ideal for checking immediate landing spots across cliffs
+            int scanRadius = 3;
+
+            for (int x = 0; x < width; x++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    if (!IsWalkable(map, x, y))
+                        continue;
+
+                    float currentHeight = map[x, y].TerrainHeight;
+                    var validDestinations = new List<IntPoint>();
+
+                    // Scan the local neighborhood around this specific walkable tile
+                    int startX = Math.Max(0, x - scanRadius);
+                    int endX = Math.Min(width, x + scanRadius);
+                    int startY = Math.Max(0, y - scanRadius);
+                    int endY = Math.Min(height, y + scanRadius);
+
+                    for (int nx = startX; nx < endX; nx++)
+                    {
+                        for (int ny = startY; ny < endY; ny++)
+                        {
+                            if (nx == x && ny == y) continue;
+                            if (!IsWalkable(map, nx, ny)) continue;
+
+                            float neighborHeight = map[nx, ny].TerrainHeight;
+                            float heightDiff = Math.Abs(currentHeight - neighborHeight);
+
+                            // Match the SC2 API ~16 unit single-tier threshold
+                            if (heightDiff >= 12f && heightDiff <= 22f)
+                            {
+                                validDestinations.Add(new IntPoint(nx, ny));
+                            }
+                        }
+                    }
+
+                    // If this tile has valid jump vectors, cache it using a packed integer key
+                    if (validDestinations.Count > 0)
+                    {
+                        int tileKey = GetTileKey(x, y);
+                        jumpLookupTable[tileKey] = validDestinations;
+                    }
+                }
+            }
+            return jumpLookupTable;
+        }
+
+        public bool IsReaperJumpLocation(int x, int y) => ReaperJumpLocations is not null && ReaperJumpLocations.ContainsKey(GetTileKey(x, y));
+
+        public List<IntPoint> GetReaperJump(int x, int y)
+        {
+            if (ReaperJumpLocations is null)
+            {
+                return new List<IntPoint>();
+            }
+            if (ReaperJumpLocations.TryGetValue(GetTileKey(x, y), out var result))
+            {
+                return result;
+            }
+            return new List<IntPoint>();
+        }
+
+        public HashSet<int> GetReaperJumpDestinationRegions(int x, int y)
+        {
+            if (Regions is null)
+            {
+                return new HashSet<int>();
+            }
+            return GetReaperJump(x, y).Select(x => Regions[x.X, x.Y]).ToHashSet();
+        }
 
         public void SaveGridImage(
             int rows,
@@ -2072,6 +2169,41 @@
                     bb = Math.Clamp(bb, 0, 255);
 
                     return System.Drawing.Color.FromArgb(rr, gg, bb);
+                });
+        }
+
+        public void SaveReaperJumpLocations()
+        {
+            if (ReaperJumpLocations is null)
+            {
+                return;
+            }
+            var map = MapData.Map;
+            var mcs = map.Cast<MapCell>();
+            var maxHeight = mcs.Max(x => x.TerrainHeight);
+            var minHeight = mcs.Min(x => x.TerrainHeight);
+            var heightDiff = maxHeight - minHeight;
+            var scale = 1.0 / heightDiff;
+            var nRows = map.GetLength(0);
+            var nCols = map.GetLength(1);
+
+            int HeightValue(MapCell m)
+            {
+                return (int)((m.TerrainHeight - minHeight) * scale * 200.0);
+            }
+
+            SaveGridImage(
+                nRows,
+                nCols,
+                @"C:\temp\outlineProximities.png",
+                (r, c) =>
+                {
+                    int x = HeightValue(map[r, c]);
+
+                    return System.Drawing.Color.FromArgb(
+                        IsReaperJumpLocation(r, c) ? 255 : x,
+                        x,
+                        x);
                 });
         }
     }
