@@ -1705,6 +1705,19 @@
             return Array.Empty<int>();
         }
 
+        public int[] OrderTargetComponents(UnitOrder order) => order.TargetCase switch
+        {
+            UnitOrder.TargetOneofCase.TargetWorldSpacePos => GetConnectedComponents(order.TargetWorldSpacePos),
+            UnitOrder.TargetOneofCase.TargetUnitTag => GetConnectedComponentsByUnitTag(order.TargetUnitTag),
+            _ => Array.Empty<int>()
+        };
+
+        public bool OrderCrossesComponents(int startComponent, UnitOrder order)
+        {
+            var targetComponents = OrderTargetComponents(order);
+            return targetComponents.Length > 0 && !targetComponents.Contains(startComponent);
+        }
+
         public bool IsCrossingComponents(UnitCalculation uc)
         {
             var orders = uc.Unit.Orders;
@@ -1720,13 +1733,7 @@
             var component = components[0];
             foreach (var o in uc.Unit.Orders)
             {
-                var targetComponents = o.TargetCase switch
-                {
-                    UnitOrder.TargetOneofCase.TargetWorldSpacePos => GetConnectedComponents(o.TargetWorldSpacePos),
-                    UnitOrder.TargetOneofCase.TargetUnitTag => GetConnectedComponentsByUnitTag(o.TargetUnitTag),
-                    _ => Array.Empty<int>()
-                };
-                return targetComponents.Length > 0 && !targetComponents.Contains(component);
+                return OrderCrossesComponents(component, o);
             }
             return false;
         }
