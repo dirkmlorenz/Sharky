@@ -101,6 +101,8 @@
             public Point2D ToPoint2D() => new Point2D { X = X, Y = Y };
         }
 
+        public readonly record struct HealingShrineInfo(Point2D Pos, bool ForFlyers);
+
         ActiveUnitData ActiveUnitData;
         MapData MapData;
         SharkyUnitData SharkyUnitData;
@@ -118,6 +120,7 @@
         private int[,] Regions = null;
         private RegionAnalysis RegionsInfo;
         private Dictionary<int, List<IntPoint>> ReaperJumpLocations = null;
+        private readonly List<HealingShrineInfo> HealingShrines = new();
 
         public bool FullVisionMode { get; set; } = false;
         public bool DoUpdateConnectedComponents { get; set; } = false;
@@ -157,6 +160,10 @@
 
             foreach (var unit in observation.Observation.RawData.Units)
             {
+                if (unit.UnitType == (uint)UnitTypes.NEUTRAL_XELNAGAHEALINGSHRINE)
+                {
+                    HealingShrines.Add(new HealingShrineInfo { Pos = unit.Pos.ToPoint2D(), ForFlyers = gameInfo.MapName == "Torches AIE" });
+                }
                 foreach (var node in GetNodesInFootPrint(unit, MapData.MapWidth, MapData.MapHeight))
                 {
                     MapData.Map[node.X, node.Y].Walkable = true;
@@ -1754,6 +1761,7 @@
         public int GetRegion(UnitCalculation uc) => GetRegion(uc.Position);
         public int GetRegion(Point p) => GetRegion(p.X, p.Y);
         public int GetRegion(Point2D p) => GetRegion(p.X, p.Y);
+        public int GetRegion(IntPoint p) => GetRegion(p.X, p.Y);
 
         public RegionInfo GetRegionInfo(int x, int y)
         {
@@ -1780,6 +1788,28 @@
         {
             return (x << 16) | (y & 0xFFFF);
         }
+
+        public IEnumerable<IntPoint> GetNeighbors(int x, int y)
+        {
+            var width = MapData.MapWidth;
+            var height = MapData.MapHeight;
+            int startX = Math.Max(0, x - 1);
+            int endX = Math.Min(width, x + 2);
+            int startY = Math.Max(0, y - 1);
+            int endY = Math.Min(height, y + 2);
+            for (int nx = startX; nx < endX; nx++)
+            {
+                for (int ny = startY; ny < endY; ny++)
+                {
+                    if (nx != x || ny != y)
+                    {
+                        yield return new IntPoint(nx, ny);
+                    }
+                }
+            }
+        }
+
+        public IEnumerable<IntPoint> GetNeighbors(IntPoint p) => GetNeighbors(p.X, p.Y);
 
         public Dictionary<int, List<IntPoint>> FindReaperJumps()
         {
@@ -1859,6 +1889,9 @@
             }
             return GetReaperJump(x, y).Select(x => Regions[x.X, x.Y]).ToHashSet();
         }
+
+        public IEnumerable<HealingShrineInfo> GetHealingShrines() => HealingShrines;
+        public IEnumerable<Point2D> GetFlyerHealingShrines() => HealingShrines.Where(x => x.ForFlyers).Select(x => x.Pos);
 
         public void SaveGridImage(
             int rows,
